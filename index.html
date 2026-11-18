@@ -163,6 +163,13 @@ img{display:block}
 .err.on{display:flex}
 .err label{background:var(--lime);color:var(--navy);padding:10px 18px;font:16px var(--display);letter-spacing:.05em;cursor:pointer}
 
+.camrow{display:flex;gap:8px;margin-bottom:10px}
+.camrow select{flex:1;min-height:44px;font:16px var(--body);font-weight:600;color:var(--ink);background:rgba(20,35,61,.9);border:1.5px solid #2b4268;padding:0 36px 0 12px;appearance:none;-webkit-appearance:none;border-radius:0;
+  background-image:linear-gradient(45deg,transparent 50%,var(--lime) 50%),linear-gradient(-45deg,transparent 50%,var(--lime) 50%);background-position:calc(100% - 18px) 50%,calc(100% - 12px) 50%;background-size:6px 6px;background-repeat:no-repeat}
+.camrow select:focus-visible{outline:3px solid var(--lime);outline-offset:2px}
+.zoom{display:flex;align-items:center;gap:10px;margin-bottom:22px;font:15px var(--display);letter-spacing:.06em;color:var(--sky)}
+.zoom input{flex:1;accent-color:var(--lime);height:44px}
+.zoom b{font:15px var(--display);color:var(--lime);min-width:3.2em;text-align:right}
 .side h3{font:22px var(--display);letter-spacing:.06em;color:var(--sky);margin:0 0 10px;text-shadow:4px -1px 3px rgba(169,205,238,.35)}
 .filters{display:grid;gap:10px;margin-bottom:22px}
 .fbtn{display:flex;align-items:center;gap:14px;text-align:left;background:rgba(20,35,61,.85);color:var(--ink);border:1.5px solid #2b4268;padding:8px 12px 8px 8px;min-height:64px;transition:.15s}
@@ -290,6 +297,12 @@ img{display:block}
       <div class="sticker" data-sticker="card" style="width:130px;right:-20px;bottom:-30px;rotate:7deg"></div>
     </div>
     <aside class="side">
+      <h3>CAMERA</h3>
+      <div class="camrow">
+        <select id="camSel" aria-label="Choose camera"><option>Default camera</option></select>
+        <button class="ghost" id="flipBtn" title="Switch front / back">FLIP</button>
+      </div>
+      <label class="zoom"><span>ZOOM</span><input type="range" id="zoom" min="1" max="2.5" step="0.05" value="1"><b id="zoomVal">1.0×</b></label>
       <h3>FILTER</h3>
       <div class="filters" id="filters"></div>
       <h3>SHOTS</h3>
@@ -555,12 +568,61 @@ function renderThemes(){
 }
 
 /* ================= camera ================= */
-async function startCamera(){
+/* camera choice: front / back / any extra lens the device lists (e.g. ultra wide) */
+let cams = [], camId = null, mirror = true, zoom = 1, hwZoom = null;
+const store = { get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
+                set(k, v){ try { localStorage.setItem(k, v); } catch(e){} } };
+camId = store.get("pb-cam");
+const isBack  = l => /back|rear|environment|world/i.test(l);
+const isExtra = l => /ultra|wide|tele|dual|triple|desk/i.test(l);
+function niceName(l, i){
+  if (!l) return `Camera ${i+1}`;
+  const side = isBack(l) ? "Back" : /front|user|facetime/i.test(l) ? "Front" : "";
+  const lens = /ultra/i.test(l) ? "ultra wide" : /tele/i.test(l) ? "telephoto" : /triple|dual/i.test(l) ? "auto (all lenses)" : /desk/i.test(l) ? "desk view" : "";
+  return side ? `${side} camera${lens ? " · " + lens : ""}` : l;
+}
+async function listCams(){
+  try { cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput"); } catch(e){ cams = []; }
+  // normal front first, then normal back, then the extra lenses
+  const rank = d => (isBack(d.label) ? 2 : 0) + (isExtra(d.label) ? 1 : 0);
+  cams.sort((x, y) => rank(x) - rank(y));
+  const sel = $("#camSel");
+  sel.innerHTML = cams.length ? cams.map((d, i) => `<option value="${d.deviceId}">${niceName(d.label, i)}</option>`).join("") : "<option>Default camera</option>";
+  if (camId && cams.some(d => d.deviceId === camId)) sel.value = camId;
+  $("#flipBtn").style.display = cams.length > 1 ? "" : "none";
+}
+// pick the plain (non ultra-wide) camera on the requested side
+function plainCam(back){
+  const side = cams.filter(d => isBack(d.label) === back);
+  return (side.find(d => !isExtra(d.label)) || side[0] || {}).deviceId;
+}
+async function startCamera(force){
   $("#err").classList.remove("on");
-  if (stream || still) return loop();
+  if (!force && (stream || still)) return loop();
+  if (stream){ stream.getTracks().forEach(t => t.stop()); stream = null; }
+  const size = {width:{ideal:1280}, height:{ideal:960}};
   try {
-    stream = await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280}, height:{ideal:960}, facingMode:"user"}, audio:false});
-    video.srcObject = stream; await video.play(); loop();
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({video: camId ? {...size, deviceId:{exact:camId}} : {...size, facingMode:"user"}, audio:false});
+    } catch (e) {                                  // saved camera gone? fall back to the default front camera
+      if (!camId) throw e; camId = null;
+      stream = await navigator.mediaDevices.getUserMedia({video:{...size, facingMode:"user"}, audio:false});
+    }
+    video.srcObject = stream; await video.play();
+    const track = stream.getVideoTracks()[0], set = track.getSettings ? track.getSettings() : {};
+    const first = !cams.some(d => d.label);        // labels only appear after permission
+    await listCams();
+    // first visit: if the browser opened an ultra-wide or back lens, switch to the plain front camera
+    if (first && !store.get("pb-cam")){
+      const want = plainCam(false);
+      if (want && want !== set.deviceId){ camId = want; return startCamera(true); }
+    }
+    camId = set.deviceId || camId;
+    if (camId) $("#camSel").value = camId;
+    const label = track.label || "";
+    mirror = set.facingMode ? set.facingMode !== "environment" : !isBack(label);   // mirror selfies, not the back camera
+    setupZoom(track, label);
+    loop();
   } catch (e) {
     $("#errMsg").textContent = location.protocol === "file:" || (location.protocol === "http:" && location.hostname !== "localhost")
       ? "Camera needs https or localhost. Try: python -m http.server, then open localhost:8000."
@@ -568,6 +630,35 @@ async function startCamera(){
     $("#err").classList.add("on");
   }
 }
+// zoom: real lens zoom when the device supports it (iPad/iPhone Safari does), otherwise a digital crop
+function setupZoom(track, label){
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  const saved = parseFloat(store.get("pb-zoom-" + camId));
+  const slider = $("#zoom");
+  if (caps.zoom && caps.zoom.max > caps.zoom.min){
+    hwZoom = track;
+    slider.min = Math.max(1, caps.zoom.min); slider.max = Math.min(caps.zoom.max, 4); slider.step = .05;
+  } else {
+    hwZoom = null; slider.min = 1; slider.max = 2.5; slider.step = .05;
+  }
+  // ultra-wide lenses start zoomed in a bit so the shot looks like a normal camera
+  const start = !isNaN(saved) ? saved : /ultra/i.test(label) ? 1.6 : 1;
+  setZoom(Math.min(Math.max(start, +slider.min), +slider.max));
+}
+function setZoom(z){
+  zoom = z; $("#zoom").value = z; $("#zoomVal").textContent = z.toFixed(1) + "×";
+  if (hwZoom) hwZoom.applyConstraints({advanced:[{zoom:z}]}).catch(() => { hwZoom = null; });
+  if (camId) store.set("pb-zoom-" + camId, z);
+}
+$("#zoom").addEventListener("input", e => setZoom(+e.target.value));
+$("#camSel").addEventListener("change", e => { if (busy) return; camId = e.target.value; store.set("pb-cam", camId); startCamera(true); });
+$("#flipBtn").addEventListener("click", () => {
+  if (busy || !cams.length) return;
+  const cur = cams.find(d => d.deviceId === camId), back = cur ? !isBack(cur.label) : true;
+  const next = plainCam(back); if (!next) return;
+  camId = next; store.set("pb-cam", camId); startCamera(true);
+});
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener("devicechange", listCams);
 function stopCamera(){ cancelAnimationFrame(raf); if (stream){ stream.getTracks().forEach(t => t.stop()); stream = null; } }
 $("#fileIn").addEventListener("change", e => {
   const f = e.target.files[0]; if (!f) return;
@@ -578,8 +669,11 @@ $("#fileIn").addEventListener("change", e => {
 function drawSource(ctx, src, w, h){
   const sw = src.videoWidth || src.naturalWidth, sh = src.videoHeight || src.naturalHeight;
   if (!sw) return false;
-  const s = Math.max(w/sw, h/sh), dw = sw*s, dh = sh*s;
-  ctx.save(); ctx.translate(w, 0); ctx.scale(-1, 1); ctx.drawImage(src, (w-dw)/2, (h-dh)/2, dw, dh); ctx.restore();
+  const dz = (src === video && !hwZoom) ? zoom : 1;          // digital zoom when the lens can't zoom itself
+  const s = Math.max(w/sw, h/sh) * dz, dw = sw*s, dh = sh*s;
+  ctx.save();
+  if (src === video && mirror){ ctx.translate(w, 0); ctx.scale(-1, 1); }
+  ctx.drawImage(src, (w-dw)/2, (h-dh)/2, dw, dh); ctx.restore();
   return true;
 }
 function renderFrame(){ if (drawSource(fctx, still || video, W, H)) applyFilter(vctx, fc, W, H, filter, tick++); }
